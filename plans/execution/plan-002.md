@@ -103,6 +103,8 @@ CKO/
 ### 3. Documentation
 - File: `documents/generated/pr-bot-setup-guide.md`
 - Content: Setup instructions, customization, troubleshooting
+- File: `documents/generated/bot-control-guide.md`
+- Content: Enable/disable controls, configuration methods
 
 ## Success Criteria
 

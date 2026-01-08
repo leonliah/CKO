@@ -232,7 +232,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       - name: Comment on non-version PR
-        if: steps.analyze.outputs.is_version_only != 'true'
+        if: steps.analyze.outputs.is_version_only == 'false'
         run: |
           gh pr comment ${{ github.event.pull_request.number }} --body "ℹ️ **Auto-approve bot**: This PR contains changes beyond version bumps and requires manual review.
 
@@ -241,7 +241,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       - name: Comment on failed CI
-        if: steps.analyze.outputs.is_version_only == 'true' && steps.check_ci.outputs.ci_passed != 'true'
+        if: steps.analyze.outputs.is_version_only == 'true' && steps.check_ci.outputs.ci_passed == 'false'
         run: |
           gh pr comment ${{ github.event.pull_request.number }} --body "⚠️ **Auto-approve bot**: This PR contains only version changes but CI checks have not all passed yet.
 

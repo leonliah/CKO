@@ -1,0 +1,252 @@
+name: Auto-Approve Version Bumps
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  auto-approve:
+    runs-on: ubuntu-latest
+    # Only run on internal PRs, not forks
+    if: github.event.pull_request.head.repo.full_name == github.repository
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Fetch base branch
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.ref }}
+
+      - name: Check if bot is enabled
+        id: check_enabled
+        run: |
+          # Check repository variable first (highest priority)
+          if [ "${{ vars.AUTO_APPROVE_ENABLED }}" = "false" ]; then
+            echo "Bot disabled via repository variable"
+            echo "enabled=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Check configuration file
+          if [ -f ".github/version-bot-config.yml" ]; then
+            ENABLED=$(grep -A1 "^settings:" .github/version-bot-config.yml | grep "enabled:" | awk '{print $2}')
+            DRY_RUN=$(grep -A5 "^settings:" .github/version-bot-config.yml | grep "dry_run:" | awk '{print $2}')
+
+            echo "Config enabled: $ENABLED"
+            echo "Config dry_run: $DRY_RUN"
+
+            if [ "$ENABLED" = "false" ]; then
+              echo "Bot disabled via configuration file"
+              echo "enabled=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+
+            echo "enabled=true" >> $GITHUB_OUTPUT
+            echo "dry_run=$DRY_RUN" >> $GITHUB_OUTPUT
+          else
+            # Default: enabled
+            echo "enabled=true" >> $GITHUB_OUTPUT
+            echo "dry_run=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check PR labels
+        id: check_labels
+        if: steps.check_enabled.outputs.enabled == 'true'
+        run: |
+          LABELS=$(gh pr view ${{ github.event.pull_request.number }} --json labels --jq '.labels[].name' || echo "")
+
+          # Check for skip label
+          if echo "$LABELS" | grep -q "skip-auto-approve"; then
+            echo "PR has 'skip-auto-approve' label, skipping bot"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "skip=false" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Analyze changes
+        id: analyze
+        if: steps.check_enabled.outputs.enabled == 'true' && steps.check_labels.outputs.skip != 'true'
+        run: |
+          echo "Analyzing PR #${{ github.event.pull_request.number }}"
+
+          # Get list of changed files
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.event.pull_request.base.ref }}...HEAD)
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          # Define version-related file patterns
+          VERSION_PATTERNS=(
+            "versions.tf$"
+            "terraform.tfvars$"
+            "terragrunt.hcl$"
+            ".terraform.lock.hcl$"
+            "values.yaml$"
+            "Chart.yaml$"
+            "application.yaml$"
+            "kustomization.yaml$"
+          )
+
+          # Check if all changed files match version patterns
+          IS_VERSION_ONLY="true"
+
+          while IFS= read -r file; do
+            if [ -z "$file" ]; then
+              continue
+            fi
+
+            MATCHES_PATTERN="false"
+            for pattern in "${VERSION_PATTERNS[@]}"; do
+              if echo "$file" | grep -qE "$pattern"; then
+                MATCHES_PATTERN="true"
+                break
+              fi
+            done
+
+            if [ "$MATCHES_PATTERN" = "false" ]; then
+              echo "❌ File does not match version patterns: $file"
+              IS_VERSION_ONLY="false"
+              break
+            else
+              echo "✅ File matches version pattern: $file"
+            fi
+          done <<< "$CHANGED_FILES"
+
+          echo "is_version_only=$IS_VERSION_ONLY" >> $GITHUB_OUTPUT
+
+          # Analyze the actual diff content for version-related changes
+          if [ "$IS_VERSION_ONLY" = "true" ]; then
+            echo ""
+            echo "Checking diff content for version-only changes..."
+
+            # Get the full diff
+            DIFF_OUTPUT=$(git diff origin/${{ github.event.pull_request.base.ref }}...HEAD)
+
+            # Look for suspicious patterns that might indicate non-version changes
+            # This is a basic check - can be enhanced based on your needs
+            if echo "$DIFF_OUTPUT" | grep -qE "^\+.*\b(function|def|class|module|resource|data)\b"; then
+              echo "⚠️  Detected potential code changes (new functions/resources)"
+              IS_VERSION_ONLY="false"
+            fi
+
+            echo "is_version_only=$IS_VERSION_ONLY" >> $GITHUB_OUTPUT
+          fi
+
+          if [ "$IS_VERSION_ONLY" = "true" ]; then
+            echo "✅ PR contains only version-related changes"
+          else
+            echo "❌ PR contains non-version changes"
+          fi
+
+      - name: Check CI status
+        id: check_ci
+        if: steps.analyze.outputs.is_version_only == 'true'
+        run: |
+          # Wait a bit for CI checks to start
+          sleep 10
+
+          # Check if there are any required checks
+          CHECK_RUNS=$(gh api repos/${{ github.repository }}/commits/${{ github.event.pull_request.head.sha }}/check-runs --jq '.check_runs')
+
+          if [ "$CHECK_RUNS" = "[]" ]; then
+            echo "No CI checks found, proceeding with approval"
+            echo "ci_passed=true" >> $GITHUB_OUTPUT
+          else
+            # Check if all checks passed
+            FAILED_CHECKS=$(gh api repos/${{ github.repository }}/commits/${{ github.event.pull_request.head.sha }}/check-runs --jq '.check_runs[] | select(.conclusion != "success" and .conclusion != null) | .name')
+
+            if [ -z "$FAILED_CHECKS" ]; then
+              echo "✅ All CI checks passed"
+              echo "ci_passed=true" >> $GITHUB_OUTPUT
+            else
+              echo "❌ Some CI checks failed:"
+              echo "$FAILED_CHECKS"
+              echo "ci_passed=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Auto-approve PR
+        if: steps.analyze.outputs.is_version_only == 'true' && steps.check_ci.outputs.ci_passed == 'true' && steps.check_enabled.outputs.dry_run != 'true'
+        run: |
+          gh pr review ${{ github.event.pull_request.number }} --approve --body "🤖 **Auto-approved**: This PR only contains version bump changes.
+
+          **Analyzed files:**
+          $(git diff --name-only origin/${{ github.event.pull_request.base.ref }}...HEAD | sed 's/^/- /')
+
+          **Approval criteria met:**
+          ✅ Only version-related files changed
+          ✅ All CI checks passed
+          ✅ PR from internal repository (not a fork)
+
+          _This is an automated approval. If you believe this is incorrect, please re-review manually._"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Dry-run comment
+        if: steps.analyze.outputs.is_version_only == 'true' && steps.check_ci.outputs.ci_passed == 'true' && steps.check_enabled.outputs.dry_run == 'true'
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --body "🧪 **DRY-RUN MODE**: This PR would have been auto-approved.
+
+          **Analyzed files:**
+          $(git diff --name-only origin/${{ github.event.pull_request.base.ref }}...HEAD | sed 's/^/- /')
+
+          **Approval criteria met:**
+          ✅ Only version-related files changed
+          ✅ All CI checks passed
+          ✅ PR from internal repository (not a fork)
+
+          _Bot is in dry-run mode. To enable auto-approval, set \`dry_run: false\` in \`.github/version-bot-config.yml\`_"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Comment on disabled bot
+        if: steps.check_enabled.outputs.enabled != 'true'
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --body "ℹ️ **Auto-approve bot is currently disabled**.
+
+          To enable it:
+          - Set repository variable \`AUTO_APPROVE_ENABLED=true\`, or
+          - Set \`enabled: true\` in \`.github/version-bot-config.yml\`"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Comment on skipped PR
+        if: steps.check_labels.outputs.skip == 'true'
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --body "ℹ️ **Auto-approve bot skipped** due to \`skip-auto-approve\` label.
+
+          Remove the label if you want the bot to analyze this PR."
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Comment on non-version PR
+        if: steps.analyze.outputs.is_version_only != 'true'
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --body "ℹ️ **Auto-approve bot**: This PR contains changes beyond version bumps and requires manual review.
+
+          _This bot only auto-approves PRs that exclusively modify version-related files._"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Comment on failed CI
+        if: steps.analyze.outputs.is_version_only == 'true' && steps.check_ci.outputs.ci_passed != 'true'
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --body "⚠️ **Auto-approve bot**: This PR contains only version changes but CI checks have not all passed yet.
+
+          The bot will auto-approve once all CI checks succeed.
+
+          _Manual approval is still available if needed._"
+        env:
+          GH_TOKEN: ${{ github.token }}

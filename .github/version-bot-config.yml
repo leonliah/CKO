@@ -1,0 +1,79 @@
+# Configuration for Auto-Approve Version Bumps Bot
+
+# File patterns that are considered "version-related" and safe to auto-approve
+version_file_patterns:
+  # Terraform
+  - "versions.tf$"
+  - "terraform.tfvars$"
+  - ".terraform.lock.hcl$"
+
+  # Terragrunt
+  - "terragrunt.hcl$"
+
+  # ArgoCD / Kubernetes
+  - "values.yaml$"
+  - "Chart.yaml$"
+  - "application.yaml$"
+  - "kustomization.yaml$"
+  - "requirements.yaml$"
+
+  # Add more patterns as needed
+  # - "your-pattern-here$"
+
+# Optional: Exclude specific paths from auto-approval
+# Even if they match version patterns, these will require manual review
+excluded_paths:
+  - "production/critical-service/"  # Example: critical production services
+  # - "path/to/exclude/"
+
+# Optional: Require specific labels for auto-approval
+# required_labels:
+#   - "dependencies"
+#   - "version-bump"
+
+# Optional: Skip auto-approval if PR has certain labels
+# skip_labels:
+#   - "needs-manual-review"
+#   - "breaking-change"
+
+# Bot behavior settings
+settings:
+  # MASTER SWITCH: Enable or disable the bot entirely
+  # Set to false to disable auto-approvals globally
+  enabled: true
+
+  # DRY RUN MODE: When true, bot analyzes but doesn't approve
+  # Useful for testing and validation before going live
+  dry_run: false
+
+  # Wait time (seconds) before checking CI status
+  ci_check_delay: 10
+
+  # Require all CI checks to pass before approving
+  require_ci_pass: true
+
+  # Only approve PRs from repository members (not external contributors)
+  internal_only: true
+
+  # Add comment explaining the auto-approval
+  add_comment: true
+
+# Approval message template (optional customization)
+approval_message: |
+  🤖 **Auto-approved**: This PR only contains version bump changes.
+
+  **Analyzed files:**
+  {files}
+
+  **Approval criteria met:**
+  ✅ Only version-related files changed
+  ✅ All CI checks passed
+  ✅ PR from internal repository (not a fork)
+
+  _This is an automated approval. If you believe this is incorrect, please re-review manually._
+
+# Comment for non-version PRs
+non_version_message: |
+  ℹ️ **Auto-approve bot**: This PR contains changes beyond version bumps and requires manual review.
+
+  _This bot only auto-approves PRs that exclusively modify version-related files._

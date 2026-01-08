@@ -2,6 +2,9 @@
 claud-api-key.txt
 *.txt
 
+# Exclude prompts directory from tracking
+prompts/
+
 # Environment variables
 .env
 .env.local
